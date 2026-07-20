@@ -32,7 +32,7 @@ import torch._dynamo
 torch._dynamo.config.suppress_errors = True
 
 # ============ 路径配置 (远程Linux服务器) ============
-DATA_CACHE_DIR = "/mnt/data/zhouheng"  # 数据集缓存目录
+DATA_CACHE_DIR = "/mnt/data/zhouheng/mot"  # 数据集缓存目录
 
 rmtree('./results_mot', ignore_errors=True)
 results_folder = Path('./results_mot')
