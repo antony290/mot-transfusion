@@ -697,12 +697,16 @@ class AdaptiveWrapper(Module):
         fn: Module,
         dim,
         dim_cond,
-        ada_ln_zero_init_bias = -2
+        ada_ln_zero_init_bias = -2,
+        num_modalities = 1,
+        use_mot = False
     ):
         super().__init__()
         self.fn = fn
         self.dim = dim
         self.dim_cond = dim_cond
+        self.use_mot = use_mot
+        self.num_modalities = num_modalities
 
         self.layernorm = nn.LayerNorm(dim, elementwise_affine = False)
 
@@ -714,12 +718,25 @@ class AdaptiveWrapper(Module):
 
         # modalities will get the adaptive layernorm + ada-ln zero
 
-        self.to_film = Linear(dim_cond, dim * 2)
-        self.to_ada_ln_zero = Linear(dim_cond, dim)
+        if use_mot:
+            self.to_film = ModuleList([
+                Linear(dim_cond, dim * 2) for _ in range(num_modalities)
+            ])
+            self.to_ada_ln_zero = ModuleList([
+                Linear(dim_cond, dim) for _ in range(num_modalities)
+            ])
 
-        nn.init.zeros_(self.to_film.weight)
-        nn.init.zeros_(self.to_ada_ln_zero.weight)
-        nn.init.constant_(self.to_ada_ln_zero.bias, ada_ln_zero_init_bias)
+            for i in range(num_modalities):
+                nn.init.zeros_(self.to_film[i].weight)
+                nn.init.zeros_(self.to_ada_ln_zero[i].weight)
+                nn.init.constant_(self.to_ada_ln_zero[i].bias, ada_ln_zero_init_bias)
+        else:
+            self.to_film = Linear(dim_cond, dim * 2)
+            self.to_ada_ln_zero = Linear(dim_cond, dim)
+
+            nn.init.zeros_(self.to_film.weight)
+            nn.init.zeros_(self.to_ada_ln_zero.weight)
+            nn.init.constant_(self.to_ada_ln_zero.bias, ada_ln_zero_init_bias)
 
     @typecheck
     def forward_text(
@@ -746,13 +763,17 @@ class AdaptiveWrapper(Module):
         self,
         x: Float['b n {self.dim}'],
         cond: Float['... {self.dim_cond}'],
+        modality_type = 0,
         **kwargs
     ):
         x = self.layernorm(x)
 
-        gamma, beta = self.to_film(cond).chunk(2, dim = -1)
-
-        modality_tokens = x * (gamma + 1.) + beta
+        if self.use_mot:
+            gamma, beta = self.to_film[modality_type](cond).chunk(2, dim = -1)
+            modality_tokens = x * (gamma + 1.) + beta
+        else:
+            gamma, beta = self.to_film(cond).chunk(2, dim = -1)
+            modality_tokens = x * (gamma + 1.) + beta
 
         # attention or feedforwards
 
@@ -762,7 +783,10 @@ class AdaptiveWrapper(Module):
 
         # take care of conditioning output separately for text vs modality
 
-        modalities_out = out * self.to_ada_ln_zero(cond).sigmoid()
+        if self.use_mot:
+            modalities_out = out * self.to_ada_ln_zero[modality_type](cond).sigmoid()
+        else:
+            modalities_out = out * self.to_ada_ln_zero(cond).sigmoid()
 
         # take care of function returning cache or value residual
 
@@ -776,6 +800,7 @@ class AdaptiveWrapper(Module):
         x: Float['b n {self.dim}'],
         cond: Float['... {self.dim_cond}'] | None = None,
         is_any_modality: bool | Bool['b n'] | None = None,
+        modality_type_mask: Int['b n'] | None = None,
         modality_only = False,
         **kwargs
     ):
@@ -783,7 +808,7 @@ class AdaptiveWrapper(Module):
             cond = rearrange(cond, 'b d -> b 1 d')
 
         if modality_only:
-            return self.forward_modality(x, cond = cond, **kwargs)
+            return self.forward_modality(x, cond = cond, modality_type_mask = modality_type_mask, **kwargs)
 
         assert not (exists(cond) ^ exists(is_any_modality))
 
@@ -799,27 +824,56 @@ class AdaptiveWrapper(Module):
 
         x = self.layernorm(x)
 
-        gamma, beta = self.to_film(cond).chunk(2, dim = -1)
+        if self.use_mot and exists(modality_type_mask):
+            x_out = torch.zeros_like(x)
 
-        text_tokens = x * (self.layernorm_gamma + 1.)
+            text_mask = ~is_any_modality.squeeze(-1)
+            if text_mask.any():
+                x_out[text_mask] = x[text_mask] * (self.layernorm_gamma + 1.)
 
-        modality_tokens = x * (gamma + 1.) + beta
+            for mod_type in range(self.num_modalities):
+                mod_mask = modality_type_mask == mod_type + 1
+                if mod_mask.any():
+                    gamma, beta = self.to_film[mod_type](cond).chunk(2, dim = -1)
+                    x_out[mod_mask] = x[mod_mask] * (gamma[mod_mask] + 1.) + beta[mod_mask]
 
-        x = torch.where(is_any_modality, modality_tokens, text_tokens)
+            x = x_out
+        else:
+            gamma, beta = self.to_film(cond).chunk(2, dim = -1)
+
+            text_tokens = x * (self.layernorm_gamma + 1.)
+
+            modality_tokens = x * (gamma + 1.) + beta
+
+            x = torch.where(is_any_modality, modality_tokens, text_tokens)
 
         # attention or feedforwards
 
-        out = self.fn(x, **kwargs)
+        out = self.fn(x, modality_type_mask = modality_type_mask, **kwargs)
 
         (out, *rest), tree_spec = tree_flatten(out)
 
         # take care of conditioning output separately for text vs modality
 
-        text_out = out * (self.layerscale + 1.)
+        if self.use_mot and exists(modality_type_mask):
+            out_out = torch.zeros_like(out)
 
-        modalities_out = out * self.to_ada_ln_zero(cond).sigmoid()
+            text_mask = ~is_any_modality.squeeze(-1)
+            if text_mask.any():
+                out_out[text_mask] = out[text_mask] * (self.layerscale + 1.)
 
-        conditioned_out = torch.where(is_any_modality, modalities_out, text_out)
+            for mod_type in range(self.num_modalities):
+                mod_mask = modality_type_mask == mod_type + 1
+                if mod_mask.any():
+                    out_out[mod_mask] = out[mod_mask] * self.to_ada_ln_zero[mod_type](cond)[mod_mask].sigmoid()
+
+            conditioned_out = out_out
+        else:
+            text_out = out * (self.layerscale + 1.)
+
+            modalities_out = out * self.to_ada_ln_zero(cond).sigmoid()
+
+            conditioned_out = torch.where(is_any_modality, modalities_out, text_out)
 
         # take care of function returning cache or value residual
 
@@ -848,19 +902,45 @@ class FeedForward(Module):
         self,
         dim,
         expansion_factor = 4.,
-        dropout = 0.
+        dropout = 0.,
+        num_modalities = 1,
+        use_mot = False
     ):
         super().__init__()
         dim_inner = int(dim * expansion_factor * 2 / 3)
-        self.net = nn.Sequential(
-            Linear(dim, dim_inner * 2),
-            GEGLU(),
-            nn.Dropout(dropout),
-            Linear(dim_inner, dim)
-        )
+        
+        self.use_mot = use_mot
+        self.num_modalities = num_modalities
 
-    def forward(self, x):
-        return self.net(x)
+        if use_mot:
+            self.nets = ModuleList([
+                nn.Sequential(
+                    Linear(dim, dim_inner * 2),
+                    GEGLU(),
+                    nn.Dropout(dropout),
+                    Linear(dim_inner, dim)
+                ) for _ in range(num_modalities + 1)
+            ])
+        else:
+            self.net = nn.Sequential(
+                Linear(dim, dim_inner * 2),
+                GEGLU(),
+                nn.Dropout(dropout),
+                Linear(dim_inner, dim)
+            )
+
+    def forward(self, x, modality_type_mask: Int['b n'] | None = None):
+        if self.use_mot and exists(modality_type_mask):
+            out_list = []
+            for mod_type in range(self.num_modalities + 1):
+                mask = modality_type_mask == mod_type
+                if mask.any():
+                    mod_x = x * rearrange(mask, 'b n -> b n 1')
+                    mod_out = self.nets[mod_type](mod_x)
+                    out_list.append(mod_out)
+            return sum(out_list)
+        else:
+            return self.net(x)
 
 class Attention(Module):
     def __init__(
@@ -874,7 +954,9 @@ class Attention(Module):
         gate_values = True,
         laser = False,
         laser_softclamp_value = 15.,
-        learned_value_residual_mix = False
+        learned_value_residual_mix = False,
+        num_modalities = 1,
+        use_mot = False
     ):
         super().__init__()
         self.scale = dim_head ** -0.5
@@ -883,15 +965,45 @@ class Attention(Module):
         assert not (use_flex_attn and not exists(flex_attention)), 'flex attention is only available on torch 2.5.0 (nightly) onwards'
         self.use_flex_attn = use_flex_attn
 
-        self.to_qk = nn.Sequential(
-            Linear(dim, dim_inner * 2, bias = False),
-            Rearrange('b n (qk h d) -> qk b h n d', qk = 2, h = heads)
-        )
+        self.use_mot = use_mot
+        self.num_modalities = num_modalities
 
-        self.to_v = nn.Sequential(
-            Linear(dim, dim_inner, bias = False),
-            Rearrange('b n (h d) -> b h n d', h = heads)
-        )
+        if use_mot:
+            self.to_qk = ModuleList([
+                nn.Sequential(
+                    Linear(dim, dim_inner * 2, bias = False),
+                    Rearrange('b n (qk h d) -> qk b h n d', qk = 2, h = heads)
+                ) for _ in range(num_modalities + 1)
+            ])
+
+            self.to_v = ModuleList([
+                nn.Sequential(
+                    Linear(dim, dim_inner, bias = False),
+                    Rearrange('b n (h d) -> b h n d', h = heads)
+                ) for _ in range(num_modalities + 1)
+            ])
+
+            self.to_out = ModuleList([
+                nn.Sequential(
+                    Rearrange('b h n d -> b n (h d)'),
+                    Linear(dim_inner, dim, bias = False)
+                ) for _ in range(num_modalities + 1)
+            ])
+        else:
+            self.to_qk = nn.Sequential(
+                Linear(dim, dim_inner * 2, bias = False),
+                Rearrange('b n (qk h d) -> qk b h n d', qk = 2, h = heads)
+            )
+
+            self.to_v = nn.Sequential(
+                Linear(dim, dim_inner, bias = False),
+                Rearrange('b n (h d) -> b h n d', h = heads)
+            )
+
+            self.to_out = nn.Sequential(
+                Rearrange('b h n d -> b n (h d)'),
+                Linear(dim_inner, dim, bias = False)
+            )
 
         self.to_learned_value_residual = nn.Sequential(
             nn.Linear(dim, heads),
@@ -911,11 +1023,6 @@ class Attention(Module):
 
         self.dropout = nn.Dropout(dropout)
 
-        self.to_out = nn.Sequential(
-            Rearrange('b h n d -> b n (h d)'),
-            Linear(dim_inner, dim, bias = False)
-        )
-
     def forward(
         self,
         x,
@@ -926,7 +1033,9 @@ class Attention(Module):
         block_mask = None, # only passed in for flex attention
         return_kv_cache = False,
         return_values = False,
-        value_residual: Tensor | None = None
+        value_residual: Tensor | None = None,
+        modality_mask: Bool['b n'] | None = None,
+        modality_type_mask: Int['b n'] | None = None
     ):
         device, input_is_cuda, is_decoding_with_cache = x.device, x.is_cuda, exists(cache)
 
@@ -943,7 +1052,24 @@ class Attention(Module):
 
         # project to queries, keys, values
 
-        q, k, v = (*self.to_qk(x), self.to_v(x))
+        if self.use_mot and exists(modality_type_mask):
+            q_list, k_list, v_list = [], [], []
+            
+            for mod_type in range(self.num_modalities + 1):
+                mask = modality_type_mask == mod_type
+                if mask.any():
+                    mod_x = x * rearrange(mask, 'b n -> b n 1')
+                    mod_qk = self.to_qk[mod_type](mod_x)
+                    mod_v = self.to_v[mod_type](mod_x)
+                    q_list.append(mod_qk[0])
+                    k_list.append(mod_qk[1])
+                    v_list.append(mod_v)
+            
+            q = sum(q_list)
+            k = sum(k_list)
+            v = sum(v_list)
+        else:
+            q, k, v = (*self.to_qk(x), self.to_v(x))
 
         # value residual
 
@@ -1020,9 +1146,19 @@ class Attention(Module):
         if exists(self.to_gates):
             out = out * self.to_gates(x).sigmoid()
 
-        # combine heads and out
+        # combine heads and out - modality specific output projection for MoT
 
-        out = self.to_out(out)
+        if self.use_mot and exists(modality_type_mask):
+            out_list = []
+            for mod_type in range(self.num_modalities + 1):
+                mask = modality_type_mask == mod_type
+                if mask.any():
+                    mod_out = self.to_out[mod_type](out)
+                    mod_out = mod_out * rearrange(mask, 'b n -> b n 1')
+                    out_list.append(mod_out)
+            out = sum(out_list)
+        else:
+            out = self.to_out(out)
 
         if return_values:
             out = (out, orig_v)
@@ -1049,10 +1185,14 @@ class Transformer(Module):
         unet_skips = True,
         use_flex_attn = False,
         num_residual_streams = 1,
-        num_residual_fracs = 4
+        num_residual_fracs = 4,
+        use_mot = False,
+        num_modalities = 1
     ):
         super().__init__()
         self.use_flex_attn = use_flex_attn
+        self.use_mot = use_mot
+        self.num_modalities = num_modalities
 
         self.dim = dim
         self.dim_head = dim_head
@@ -1080,12 +1220,29 @@ class Transformer(Module):
 
             skip_proj = Linear(dim * 2, dim, bias = False) if is_latter_half and unet_skips else None
 
-            attn = Attention(dim = dim, dim_head = dim_head, heads = heads, dropout = dropout, use_flex_attn = use_flex_attn, learned_value_residual_mix = not is_first, laser = attn_laser, **attn_kwargs)
+            attn = Attention(
+                dim = dim, 
+                dim_head = dim_head, 
+                heads = heads, 
+                dropout = dropout, 
+                use_flex_attn = use_flex_attn, 
+                learned_value_residual_mix = not is_first, 
+                laser = attn_laser,
+                num_modalities = num_modalities,
+                use_mot = use_mot,
+                **attn_kwargs
+            )
 
-            ff = FeedForward(dim = dim, expansion_factor = ff_expansion_factor, **ff_kwargs)
+            ff = FeedForward(
+                dim = dim, 
+                expansion_factor = ff_expansion_factor,
+                num_modalities = num_modalities,
+                use_mot = use_mot,
+                **ff_kwargs
+            )
 
-            attn = AdaptiveWrapper(attn, dim = dim, dim_cond = dim * 4)
-            ff = AdaptiveWrapper(ff, dim = dim, dim_cond = dim * 4)
+            attn = AdaptiveWrapper(attn, dim = dim, dim_cond = dim * 4, num_modalities = num_modalities, use_mot = use_mot)
+            ff = AdaptiveWrapper(ff, dim = dim, dim_cond = dim * 4, num_modalities = num_modalities, use_mot = use_mot)
 
             attn_residual = init_residual_fn(dim = dim, layer_index = next(counter))
             ff_residual = init_residual_fn(dim = dim, layer_index = next(counter))
@@ -1103,6 +1260,7 @@ class Transformer(Module):
         attn_mask: Bool['b i j'] | None = None,
         modality_positions: RawModalityPositions | Int['b m 3'] | None = None,
         is_any_modality: bool | Bool['b n'] | None = None,
+        modality_type_mask: Int['b n'] | None = None,
         rotary_emb: Tensor | None = None,
         cache: Tensor | None = None,
         decode_length: int | None = None,
@@ -1167,12 +1325,16 @@ class Transformer(Module):
             if is_tensor(is_any_modality):
                 is_any_modality = is_any_modality[..., -decode_length:]
 
+            if is_tensor(modality_type_mask):
+                modality_type_mask = modality_type_mask[..., -decode_length:]
+
         # adaptive layernorm kwargs, which handles text and modality tokens differently
 
         adaptive_kwargs = dict(
             cond = cond,
             modality_only = modality_only,
-            is_any_modality = is_any_modality
+            is_any_modality = is_any_modality,
+            modality_type_mask = modality_type_mask
         )
 
         # handle cache
@@ -1222,6 +1384,7 @@ class Transformer(Module):
                 return_kv_cache = True,
                 return_values = True,
                 value_residual = value_residual,
+                modality_type_mask = modality_type_mask,
                 **attn_mask_kwargs,
                 **adaptive_kwargs
             )
@@ -1234,7 +1397,7 @@ class Transformer(Module):
 
             x, add_ff_residual = ff_residual(x)
 
-            ff_out = ff(x, **adaptive_kwargs)
+            ff_out = ff(x, modality_type_mask = modality_type_mask, **adaptive_kwargs)
 
             x = add_ff_residual(ff_out)
 
@@ -1283,30 +1446,38 @@ class Transfusion(Module):
             method = 'midpoint'
         ),
         eps = 1e-2,
-        prob_uncond = 0.1
+        prob_uncond = 0.1,
+        use_mot = False
     ):
         super().__init__()
-
-        # transformer
-
-        if isinstance(transformer, dict):
-            transformer = Transformer(**transformer)
-
-        self.transformer = transformer
-        dim = transformer.dim
-
-        self.dim = dim
 
         # latent and model dimension not the same
         # make it work for 1 modality for now
 
-        dim_latent = default(dim_latent, dim)
+        dim_latent = default(dim_latent, 512)
 
         self.dim_latents = cast_tuple(dim_latent)
 
         # number of modalities
 
         self.num_modalities = len(self.dim_latents)
+
+        # use Mixture-of-Transformers
+        self.use_mot = use_mot
+
+        # transformer
+
+        if isinstance(transformer, dict):
+            transformer = Transformer(
+                **transformer,
+                use_mot = use_mot,
+                num_modalities = self.num_modalities
+            )
+
+        self.transformer = transformer
+        dim = transformer.dim
+
+        self.dim = dim
 
         # whether the latents are accepted to be channel first or channel last
         # if channel first, will be rearrange(c ... -> ... c -> (...) c)
@@ -1981,12 +2152,18 @@ class Transfusion(Module):
 
         # attention
 
+        modality_type_mask = None
+        if self.use_mot:
+            batch, seq_len = tokens.shape[:2]
+            modality_type_mask = torch.zeros((batch, seq_len), dtype = torch.long, device = device)
+
         embed, kv_cache = self.transformer(
             tokens,
             rotary_emb = rotary_emb,
             causal_mask = True,
             cache = cache,
-            return_kv_cache = True
+            return_kv_cache = True,
+            modality_type_mask = modality_type_mask
         )
 
         # text unembedding
@@ -2128,10 +2305,16 @@ class Transfusion(Module):
 
         # attention
 
+        modality_type_mask = None
+        if self.use_mot:
+            batch, seq_len = noised_tokens.shape[:2]
+            modality_type_mask = torch.full((batch, seq_len), modality_type + 1, dtype = torch.long, device = noised_tokens.device)
+
         embed = self.transformer(
             noised_tokens,
             times = times,
             modality_only = True,
+            modality_type_mask = modality_type_mask
         )
 
         embed = inverse_pack_axial_dims(embed)
@@ -2733,6 +2916,15 @@ class Transfusion(Module):
 
         is_any_modality = reduce(is_modalities, 'b t m n -> b n', 'any')
 
+        # modality type mask for Mixture-of-Transformers
+        # text = 0, modality 0 = 1, modality 1 = 2, etc.
+
+        modality_type_mask = torch.zeros((batch, seq_len), dtype = torch.long, device = device)
+
+        for mod_type in range(self.num_modalities):
+            is_one_modality = reduce(is_modalities[:, mod_type], 'b m n -> b n', 'any')
+            modality_type_mask[is_one_modality] = mod_type + 1
+
         # embed text
 
         text = text.masked_fill(text == -1, 0)
@@ -2768,6 +2960,7 @@ class Transfusion(Module):
 
             is_any_modality_when_decoding = decoding_text_or_modality == 'modality'
             modality_positions = None
+            modality_type_mask = modality_type_mask[..., -decode_length:] if self.use_mot else None
 
         # times
 
@@ -2783,6 +2976,7 @@ class Transfusion(Module):
             rotary_emb = rotary_emb,
             modality_positions = modality_positions,
             is_any_modality = is_any_modality_when_decoding,
+            modality_type_mask = modality_type_mask if self.use_mot else None,
             cache = cache,
             decode_length = decode_length,
             return_kv_cache = True
