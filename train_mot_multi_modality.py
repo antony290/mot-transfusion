@@ -95,24 +95,24 @@ IMAGE_SIZE = 64  # 图像resize到64x64, 经两次下采样后latent为16x16
 MAX_TEXT_LEN = 96  # caption最大字符长度
 
 class COCOMultiModalDataset(Dataset):
-    """COCO Captions 数据集
+    """COCO Captions 数据集 - 使用torchvision直接下载
     - 每个样本包含: 图像 + 对应的文本描述(caption)
     - 图像: RGB, resize到64x64
     - 文本: 英文caption, 字符级编码(ASCII)
     """
-    def __init__(self, cache_dir=DATA_CACHE_DIR, image_size=IMAGE_SIZE, split="train"):
+    def __init__(self, root=DATA_CACHE_DIR, image_size=IMAGE_SIZE, train=True):
         super().__init__()
-        from datasets import load_dataset
-
-        print(f"正在加载COCO数据集, 缓存目录: {cache_dir}")
-        # 使用HuggingFaceM4/COCO数据集
-        self.dataset = load_dataset(
-            "HuggingFaceM4/COCO",
-            split=split,
-            cache_dir=cache_dir,
-            trust_remote_code=True,
+        import torchvision.datasets as datasets
+        
+        print(f"正在加载COCO数据集, 根目录: {root}")
+        
+        # 使用torchvision下载COCO Captions
+        self.coco = datasets.CocoCaptions(
+            root=f"{root}/coco/train2017",
+            annFile=f"{root}/coco/annotations/captions_train2017.json",
+            download=True,  # 自动下载
         )
-        print(f"数据集加载完成, 共 {len(self.dataset)} 个样本")
+        print(f"数据集加载完成, 共 {len(self.coco)} 个样本")
 
         self.transform = T.Compose([
             T.Resize((image_size, image_size)),
@@ -120,22 +120,19 @@ class COCOMultiModalDataset(Dataset):
         ])
 
     def __len__(self):
-        return len(self.dataset)
+        return len(self.coco)
 
     def __getitem__(self, idx):
-        item = self.dataset[idx]
-
+        # torchvision返回: (image, [caption1, caption2, ...])
+        image, captions = self.coco[idx]
+        
         # --- 图像模态 ---
-        image = item['image']
         if image.mode != 'RGB':
             image = image.convert('RGB')
         image_tensor = self.transform(image)  # (3, 64, 64), [0, 1]
 
-        # --- 文本模态 (真实的caption描述) ---
-        # HuggingFaceM4/COCO格式: 'caption' 或 'captions' 字段
-        caption = item.get('caption', item.get('text', ''))
-        if isinstance(caption, list):
-            caption = random.choice(caption) if len(caption) > 0 else ""
+        # --- 文本模态 (随机选一个caption) ---
+        caption = random.choice(captions) if captions else ""
 
         # 字符级编码 (ASCII, 范围0-127)
         text_str = str(caption)[:MAX_TEXT_LEN]
@@ -182,9 +179,9 @@ if __name__ == '__main__':
     ema_model = model.create_ema()
 
     dataset = COCOMultiModalDataset(
-        cache_dir=DATA_CACHE_DIR,
+        root=DATA_CACHE_DIR,
         image_size=IMAGE_SIZE,
-        split="train",
+        train=True,
     )
     dataloader = DataLoader(
         dataset,
