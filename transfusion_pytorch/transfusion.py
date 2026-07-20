@@ -1384,7 +1384,6 @@ class Transformer(Module):
                 return_kv_cache = True,
                 return_values = True,
                 value_residual = value_residual,
-                modality_type_mask = modality_type_mask,
                 **attn_mask_kwargs,
                 **adaptive_kwargs
             )
@@ -1397,7 +1396,7 @@ class Transformer(Module):
 
             x, add_ff_residual = ff_residual(x)
 
-            ff_out = ff(x, modality_type_mask = modality_type_mask, **adaptive_kwargs)
+            ff_out = ff(x, **adaptive_kwargs)
 
             x = add_ff_residual(ff_out)
 
@@ -1758,10 +1757,17 @@ class Transfusion(Module):
                     *m.to_out.parameters(),
                 ])
             elif isinstance(m, FeedForward):
-                params.extend([
-                    m.net[0].weight,
-                    m.net[-1].weight
-                ])
+                if hasattr(m, 'nets') and isinstance(m.nets, ModuleList):
+                    for net in m.nets:
+                        params.extend([
+                            net[0].weight,
+                            net[-1].weight
+                        ])
+                else:
+                    params.extend([
+                        m.net[0].weight,
+                        m.net[-1].weight
+                    ])
 
         return params
 
