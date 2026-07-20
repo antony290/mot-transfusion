@@ -15,3 +15,15 @@ pip install torch torchvision einops accelerate beartype jaxtyping ema-pytorch a
 
 # 5. 运行训练
 python train_mot_multi_modality.py
+
+###下载数据集
+
+# 设置HuggingFace镜像（国内服务器推荐）
+export HF_ENDPOINT=https://hf-mirror.com
+
+# 再运行下载
+python -c "
+from datasets import load_dataset
+ds = load_dataset('lmms-lab/coco-captions', cache_dir='/mnt/data/zhouheng')
+print(f'下载完成，样本数: {len(ds[\"train\"])}')
+"
