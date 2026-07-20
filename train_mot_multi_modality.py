@@ -7,6 +7,10 @@
 - 参考论文: https://arxiv.org/pdf/2411.04996
 """
 
+import os
+# 设置HuggingFace镜像（国内服务器）
+os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+
 from shutil import rmtree
 from pathlib import Path
 import random
