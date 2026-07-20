@@ -104,12 +104,13 @@ class COCOMultiModalDataset(Dataset):
         super().__init__()
         from datasets import load_dataset
 
-        print(f"正在加载COCO Captions数据集, 缓存目录: {cache_dir}")
-        # 使用HuggingFace datasets加载COCO captions
+        print(f"正在加载COCO数据集, 缓存目录: {cache_dir}")
+        # 使用HuggingFaceM4/COCO数据集
         self.dataset = load_dataset(
-            "lmms-lab/coco-captions",
+            "HuggingFaceM4/COCO",
             split=split,
             cache_dir=cache_dir,
+            trust_remote_code=True,
         )
         print(f"数据集加载完成, 共 {len(self.dataset)} 个样本")
 
@@ -126,22 +127,18 @@ class COCOMultiModalDataset(Dataset):
 
         # --- 图像模态 ---
         image = item['image']
-        if not isinstance(image, Image.Image):
-            image = Image.open(image).convert('RGB')
         if image.mode != 'RGB':
             image = image.convert('RGB')
         image_tensor = self.transform(image)  # (3, 64, 64), [0, 1]
 
         # --- 文本模态 (真实的caption描述) ---
-        # COCO captions: 每张图有多个caption, 随机选一个
-        captions = item.get('captions', item.get('caption', []))
-        if isinstance(captions, list):
-            caption = random.choice(captions) if len(captions) > 0 else ""
-        else:
-            caption = captions
+        # HuggingFaceM4/COCO格式: 'caption' 或 'captions' 字段
+        caption = item.get('caption', item.get('text', ''))
+        if isinstance(caption, list):
+            caption = random.choice(caption) if len(caption) > 0 else ""
 
         # 字符级编码 (ASCII, 范围0-127)
-        text_str = caption[:MAX_TEXT_LEN]
+        text_str = str(caption)[:MAX_TEXT_LEN]
         text_tokens = tensor([ord(c) for c in text_str], dtype=torch.long)
 
         return [text_tokens, image_tensor]
