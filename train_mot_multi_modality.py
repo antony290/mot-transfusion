@@ -275,6 +275,23 @@ if __name__ == '__main__':
         lr=8e-4,
     )
 
+    # 确保编码器/解码器参数在优化器中
+    all_params = set()
+    for group in optimizer.param_groups:
+        all_params.update(group['params'])
+    
+    encoder_params = list(model.modality_encoder[0].parameters())
+    decoder_params = list(model.modality_decoder[0].parameters())
+    
+    missing_params = []
+    for p in encoder_params + decoder_params:
+        if p not in all_params:
+            missing_params.append(p)
+    
+    if missing_params:
+        print(f"警告: 添加编码器/解码器参数到优化器, 共 {len(missing_params)} 个参数")
+        optimizer.add_param_group({'params': missing_params, 'lr': 8e-4})
+
     accelerator = Accelerator(
         mixed_precision='bf16',
         gradient_accumulation_steps=4,
@@ -293,7 +310,7 @@ if __name__ == '__main__':
     print(f"混合精度: bf16, 梯度累积: 2步")
     print(f"开始训练...")
 
-    for step in range(1, 200_000 + 1):
+    for step in range(1, 50_000 + 1):
         batch = next(iter_dl)
 
         loss = model(batch, velocity_consistency_ema_model=ema_model)
