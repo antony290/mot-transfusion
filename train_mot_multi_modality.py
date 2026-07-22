@@ -106,11 +106,20 @@ class COCOMultiModalDataset(Dataset):
         
         print(f"正在加载COCO数据集, 根目录: {root}")
         
-        # 使用torchvision下载COCO Captions
+        # 使用torchvision加载COCO Captions
+        img_folder = f"{root}/coco/train2017"
+        ann_file = f"{root}/coco/annotations/captions_train2017.json"
+        
+        # 检查文件是否存在
+        import os
+        if not os.path.exists(img_folder):
+            raise FileNotFoundError(f"图像文件夹不存在: {img_folder}\n请确保数据集已正确解压到 {root}/coco/")
+        if not os.path.exists(ann_file):
+            raise FileNotFoundError(f"标注文件不存在: {ann_file}\n请确保annotations/captions_train2017.json已正确放置")
+        
         self.coco = datasets.CocoCaptions(
-            root=f"{root}/coco/train2017",
-            annFile=f"{root}/coco/annotations/captions_train2017.json",
-            download=True,  # 自动下载
+            root=img_folder,
+            annFile=ann_file,
         )
         print(f"数据集加载完成, 共 {len(self.coco)} 个样本")
 
