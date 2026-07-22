@@ -188,10 +188,10 @@ model = Transfusion(
     model_output_clean=True,
     use_mot=True,                 # 启用 Mixture-of-Transformers
     transformer=dict(
-        dim=768,
-        depth=12,
+        dim=512,
+        depth=8,
         dim_head=64,
-        heads=12,
+        heads=8,
         attn_laser=True,
         ff_expansion_factor=4,
     )
@@ -250,7 +250,7 @@ if __name__ == '__main__':
     # 训练数据加载器
     train_loader = DataLoader(
         train_dataset,
-        batch_size=64,
+        batch_size=32,
         shuffle=True,
         num_workers=8,
         pin_memory=True,
@@ -260,7 +260,7 @@ if __name__ == '__main__':
     # 验证数据加载器
     val_loader = DataLoader(
         val_dataset,
-        batch_size=32,
+        batch_size=16,
         shuffle=False,
         num_workers=4,
         pin_memory=True,
@@ -277,7 +277,7 @@ if __name__ == '__main__':
 
     accelerator = Accelerator(
         mixed_precision='bf16',
-        gradient_accumulation_steps=2,
+        gradient_accumulation_steps=4,
     )
 
     model, optimizer, train_loader = accelerator.prepare(model, optimizer, train_loader)
