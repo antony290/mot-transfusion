@@ -363,19 +363,20 @@ if __name__ == '__main__':
                     
                     text_tokens = [ord(c) for c in sample_text]
                     text_tokens = torch.tensor(text_tokens, dtype=torch.long).unsqueeze(0)
-                    batch_text = text_tokens.repeat(batch_size, 1).to(ema_model.device)
+                    gen_device = next(ema_model.ema_model.parameters()).device
+                    batch_text = text_tokens.repeat(batch_size, 1).to(gen_device)
                     
-                    mod = ema_model.get_modality_info(0)
+                    mod = ema_model.ema_model.get_modality_info(0)
                     modality_shape = mod.default_shape
                     
-                    noise = torch.randn((batch_size, *modality_shape, mod.dim_latent), device=ema_model.device)
+                    noise = torch.randn((batch_size, *modality_shape, mod.dim_latent), device=gen_device)
                     if mod.channel_first_latent:
                         noise = rearrange(noise, 'b ... d -> b d ...')
                     
                     def ode_step_fn(step_times, denoised):
                         step_times_rep = repeat(step_times, ' -> b', b=batch_size)
                         
-                        flow = ema_model.forward(
+                        flow = ema_model.ema_model.forward(
                             modalities=[{'modality': denoised, 'modality_type': 0}],
                             text=batch_text,
                             times=step_times_rep,
@@ -384,8 +385,8 @@ if __name__ == '__main__':
                         )
                         return flow[0][0](denoised)
                     
-                    times = torch.linspace(0., 1., 16, device=ema_model.device)
-                    trajectory = ema_model.odeint_fn(ode_step_fn, noise, times)
+                    times = torch.linspace(0., 1., 16, device=gen_device)
+                    trajectory = ema_model.ema_model.odeint_fn(ode_step_fn, noise, times)
                     sampled_modality = trajectory[-1]
                     
                     if exists(mod.decoder):
