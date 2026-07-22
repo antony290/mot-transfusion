@@ -174,24 +174,72 @@ model = Transfusion(
 print(f"MoT模型参数量: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
 
 
+# ============ 评估函数 ============
+def evaluate(model, dataloader, device, num_batches=50):
+    """在验证集上计算平均loss"""
+    model.eval()
+    total_loss = 0.0
+    num_samples = 0
+
+    with torch.no_grad():
+        for i, batch in enumerate(dataloader):
+            if i >= num_batches:
+                break
+            try:
+                loss = model(batch)
+                total_loss += loss.item()
+                num_samples += 1
+            except Exception as e:
+                print(f"评估batch {i}出错: {e}")
+                continue
+
+    model.train()
+    avg_loss = total_loss / num_samples if num_samples > 0 else float('inf')
+    return avg_loss
+
+
 # ============ 训练主流程 ============
 if __name__ == '__main__':
     ema_model = model.create_ema()
 
-    dataset = COCOMultiModalDataset(
+    # 加载完整数据集
+    full_dataset = COCOMultiModalDataset(
         root=DATA_CACHE_DIR,
         image_size=IMAGE_SIZE,
         train=True,
     )
-    dataloader = DataLoader(
-        dataset,
+
+    # 划分训练集和验证集 (90% 训练, 10% 验证)
+    total_size = len(full_dataset)
+    train_size = int(0.9 * total_size)
+    val_size = total_size - train_size
+
+    train_dataset, val_dataset = torch.utils.data.random_split(
+        full_dataset, [train_size, val_size],
+        generator=torch.Generator().manual_seed(42)
+    )
+
+    print(f"数据集划分: 训练 {train_size} 样本, 验证 {val_size} 样本")
+
+    # 训练数据加载器
+    train_loader = DataLoader(
+        train_dataset,
         batch_size=64,
         shuffle=True,
         num_workers=8,
         pin_memory=True,
-        collate_fn=None,  # 使用默认collate (会自动padding)
     )
-    iter_dl = cycle(dataloader)
+
+    # 验证数据加载器
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=32,
+        shuffle=False,
+        num_workers=4,
+        pin_memory=True,
+    )
+
+    iter_dl = cycle(train_loader)
 
     optimizer = MuonAdamAtan2(
         model.muon_parameters(),
@@ -204,8 +252,14 @@ if __name__ == '__main__':
         gradient_accumulation_steps=2,
     )
 
-    model, optimizer, dataloader = accelerator.prepare(model, optimizer, dataloader)
+    model, optimizer, train_loader = accelerator.prepare(model, optimizer, train_loader)
+    val_loader = accelerator.prepare(val_loader)
     ema_model.to(accelerator.device)
+
+    # 训练记录
+    best_val_loss = float('inf')
+    train_losses = []
+    val_losses = []
 
     print(f"训练设备: {accelerator.device}")
     print(f"混合精度: bf16, 梯度累积: 2步")
@@ -225,8 +279,31 @@ if __name__ == '__main__':
 
         ema_model.update()
 
+        # 记录训练loss
+        train_losses.append(loss.item())
+
         if step % 100 == 0:
-            accelerator.print(f"step {step}: loss = {loss.item():.3f}")
+            avg_train_loss = sum(train_losses[-100:]) / len(train_losses[-100:])
+            accelerator.print(f"step {step}: train_loss = {loss.item():.3f}, avg_train_loss = {avg_train_loss:.3f}")
+
+        # 定期验证评估
+        if divisible_by(step, 500):
+            accelerator.print(f"正在验证评估...")
+            val_loss = evaluate(model, val_loader, accelerator.device, num_batches=20)
+            val_losses.append(val_loss)
+
+            accelerator.print(f"step {step}: val_loss = {val_loss:.3f}")
+
+            # 保存最佳模型
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                if accelerator.is_main_process:
+                    torch.save({
+                        'step': step,
+                        'model_state_dict': accelerator.unwrap_model(model).state_dict(),
+                        'val_loss': val_loss,
+                    }, str(results_folder / 'best_model.pt'))
+                    accelerator.print(f"保存最佳模型: val_loss = {val_loss:.3f}")
 
         # 定期生成样本验证
         if divisible_by(step, 1000):
@@ -251,7 +328,22 @@ if __name__ == '__main__':
             if accelerator.is_main_process:
                 torch.save({
                     'step': step,
-                    'model_state_dict': model.state_dict(),
+                    'model_state_dict': accelerator.unwrap_model(model).state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
+                    'train_losses': train_losses,
+                    'val_losses': val_losses,
+                    'best_val_loss': best_val_loss,
                 }, str(results_folder / f'checkpoint_{step}.pt'))
                 print(f"已保存checkpoint: checkpoint_{step}.pt")
+
+        # 定期保存训练曲线
+        if divisible_by(step, 2000):
+            if accelerator.is_main_process:
+                import json
+                with open(results_folder / 'training_log.json', 'w') as f:
+                    json.dump({
+                        'train_losses': train_losses,
+                        'val_losses': val_losses,
+                        'best_val_loss': best_val_loss,
+                    }, f)
+                print(f"已保存训练日志")
