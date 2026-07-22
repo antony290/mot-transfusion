@@ -357,10 +357,43 @@ if __name__ == '__main__':
             if accelerator.is_main_process:
                 model.eval()
                 with torch.no_grad():
-                    image = ema_model.generate_modality_only(batch_size=16)
-
+                    # 使用条件生成：根据文本描述生成图像
+                    sample_text = "a cat sit on the sofa"
+                    batch_size = 4
+                    
+                    text_tokens = [ord(c) for c in sample_text]
+                    text_tokens = torch.tensor(text_tokens, dtype=torch.long).unsqueeze(0)
+                    batch_text = text_tokens.repeat(batch_size, 1).to(device)
+                    
+                    mod = ema_model.get_modality_info(0)
+                    modality_shape = mod.default_shape
+                    
+                    noise = torch.randn((batch_size, *modality_shape, mod.dim_latent), device=device)
+                    if mod.channel_first_latent:
+                        noise = rearrange(noise, 'b ... d -> b d ...')
+                    
+                    def ode_step_fn(step_times, denoised):
+                        step_times_rep = repeat(step_times, ' -> b', b=batch_size)
+                        
+                        flow = ema_model.forward(
+                            modalities=[{'modality': denoised, 'modality_type': 0}],
+                            text=batch_text,
+                            times=step_times_rep,
+                            return_loss=False,
+                            return_only_pred_flows=True
+                        )
+                        return flow[0][0](denoised)
+                    
+                    times = torch.linspace(0., 1., 16, device=device)
+                    trajectory = ema_model.odeint_fn(ode_step_fn, noise, times)
+                    sampled_modality = trajectory[-1]
+                    
+                    if exists(mod.decoder):
+                        mod.decoder.eval()
+                        sampled_modality = mod.decoder(sampled_modality)
+                    
                     save_image(
-                        rearrange(image, '(gh gw) c h w -> c (gh h) (gw w)', gh=4).detach().cpu(),
+                        rearrange(sampled_modality, '(gh gw) c h w -> c (gh h) (gw w)', gh=2).detach().cpu(),
                         str(results_folder / f'step_{step}.png')
                     )
                 model.train()
