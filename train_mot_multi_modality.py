@@ -357,44 +357,11 @@ if __name__ == '__main__':
             if accelerator.is_main_process:
                 model.eval()
                 with torch.no_grad():
-                    # 使用条件生成：根据文本描述生成图像
-                    sample_text = "a cat sit on the sofa"
-                    batch_size = 4
-                    
-                    text_tokens = [ord(c) for c in sample_text]
-                    text_tokens = torch.tensor(text_tokens, dtype=torch.long).unsqueeze(0)
-                    gen_device = next(ema_model.ema_model.parameters()).device
-                    batch_text = text_tokens.repeat(batch_size, 1).to(gen_device)
-                    
-                    mod = ema_model.ema_model.get_modality_info(0)
-                    modality_shape = mod.default_shape
-                    
-                    noise = torch.randn((batch_size, *modality_shape, mod.dim_latent), device=gen_device)
-                    if mod.channel_first_latent:
-                        noise = rearrange(noise, 'b ... d -> b d ...')
-                    
-                    def ode_step_fn(step_times, denoised):
-                        step_times_rep = repeat(step_times, ' -> b', b=batch_size)
-                        
-                        flow = ema_model.ema_model.forward(
-                            modalities=[{'modality': denoised, 'modality_type': 0}],
-                            text=batch_text,
-                            times=step_times_rep,
-                            return_loss=False,
-                            return_only_pred_flows=True
-                        )
-                        return flow[0][0](denoised)
-                    
-                    times = torch.linspace(0., 1., 16, device=gen_device)
-                    trajectory = ema_model.ema_model.odeint_fn(ode_step_fn, noise, times)
-                    sampled_modality = trajectory[-1]
-                    
-                    if exists(mod.decoder):
-                        mod.decoder.eval()
-                        sampled_modality = mod.decoder(sampled_modality)
-                    
+                    # 使用无条件生成
+                    image = ema_model.ema_model.generate_modality_only(batch_size=4, modality_type=0)
+
                     save_image(
-                        rearrange(sampled_modality, '(gh gw) c h w -> c (gh h) (gw w)', gh=2).detach().cpu(),
+                        rearrange(image, '(gh gw) c h w -> c (gh h) (gw w)', gh=2).detach().cpu(),
                         str(results_folder / f'step_{step}.png')
                     )
                 model.train()
