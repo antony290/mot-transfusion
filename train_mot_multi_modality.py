@@ -156,6 +156,23 @@ def cycle(iter_dl):
             yield batch
 
 
+def collate_fn(batch):
+    """自定义collate函数，处理变长文本和固定大小图像
+    batch: list of [text_tokens, image_tensor]
+    返回: list of [text_tokens_list, image_tensor_batch] 保持与Transfusion输入格式一致
+    """
+    text_list = [item[0] for item in batch]
+    images = torch.stack([item[1] for item in batch], dim=0)
+    
+    # Transfusion期望的格式是 list of [text, image]，每个样本是一个列表
+    # 我们需要将batch按样本组织，而不是按模态组织
+    result = []
+    for i in range(len(text_list)):
+        result.append([text_list[i], images[i]])
+    
+    return result
+
+
 # ============ MoT 模型配置 ============
 model = Transfusion(
     num_text_tokens=256,          # ASCII字符空间
@@ -237,6 +254,7 @@ if __name__ == '__main__':
         shuffle=True,
         num_workers=8,
         pin_memory=True,
+        collate_fn=collate_fn,
     )
 
     # 验证数据加载器
@@ -246,6 +264,7 @@ if __name__ == '__main__':
         shuffle=False,
         num_workers=4,
         pin_memory=True,
+        collate_fn=collate_fn,
     )
 
     iter_dl = cycle(train_loader)
