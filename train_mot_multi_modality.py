@@ -250,9 +250,9 @@ if __name__ == '__main__':
     # 训练数据加载器
     train_loader = DataLoader(
         train_dataset,
-        batch_size=32,
+        batch_size=64,
         shuffle=True,
-        num_workers=8,
+        num_workers=12,
         pin_memory=True,
         collate_fn=collate_fn,
     )
@@ -294,7 +294,7 @@ if __name__ == '__main__':
 
     accelerator = Accelerator(
         mixed_precision='bf16',
-        gradient_accumulation_steps=4,
+        gradient_accumulation_steps=2,
     )
 
     model, optimizer, train_loader = accelerator.prepare(model, optimizer, train_loader)
@@ -310,7 +310,7 @@ if __name__ == '__main__':
     print(f"混合精度: bf16, 梯度累积: 2步")
     print(f"开始训练...")
 
-    for step in range(1, 50_000 + 1):
+    for step in range(1, 5_000 + 1):
         batch = next(iter_dl)
 
         loss = model(batch, velocity_consistency_ema_model=ema_model)
@@ -334,7 +334,7 @@ if __name__ == '__main__':
         # 定期验证评估
         if divisible_by(step, 500):
             accelerator.print(f"正在验证评估...")
-            val_loss = evaluate(model, val_loader, accelerator.device, num_batches=20)
+            val_loss = evaluate(model, val_loader, accelerator.device, num_batches=10)
             val_losses.append(val_loss)
 
             accelerator.print(f"step {step}: val_loss = {val_loss:.3f}")
