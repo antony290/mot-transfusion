@@ -363,12 +363,12 @@ if __name__ == '__main__':
                     
                     text_tokens = [ord(c) for c in sample_text]
                     text_tokens = torch.tensor(text_tokens, dtype=torch.long).unsqueeze(0)
-                    batch_text = text_tokens.repeat(batch_size, 1).to(device)
+                    batch_text = text_tokens.repeat(batch_size, 1).to(ema_model.device)
                     
                     mod = ema_model.get_modality_info(0)
                     modality_shape = mod.default_shape
                     
-                    noise = torch.randn((batch_size, *modality_shape, mod.dim_latent), device=device)
+                    noise = torch.randn((batch_size, *modality_shape, mod.dim_latent), device=ema_model.device)
                     if mod.channel_first_latent:
                         noise = rearrange(noise, 'b ... d -> b d ...')
                     
@@ -384,7 +384,7 @@ if __name__ == '__main__':
                         )
                         return flow[0][0](denoised)
                     
-                    times = torch.linspace(0., 1., 16, device=device)
+                    times = torch.linspace(0., 1., 16, device=ema_model.device)
                     trajectory = ema_model.odeint_fn(ode_step_fn, noise, times)
                     sampled_modality = trajectory[-1]
                     
