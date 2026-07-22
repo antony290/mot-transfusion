@@ -22,7 +22,7 @@ from torch.utils.data import Dataset, DataLoader
 
 from adam_atan2_pytorch import MuonAdamAtan2
 
-from einops import rearrange
+from einops import rearrange, repeat
 
 import torchvision
 import torchvision.transforms as T
