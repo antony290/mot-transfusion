@@ -829,12 +829,14 @@ class AdaptiveWrapper(Module):
 
             text_mask = ~is_any_modality.squeeze(-1)
             if text_mask.any():
-                x_out[text_mask] = x[text_mask] * (self.layernorm_gamma + 1.)
+                x_out[text_mask] = x[text_mask] * (self.layernorm_gamma + 1.).to(x.dtype)
 
             for mod_type in range(self.num_modalities):
                 mod_mask = modality_type_mask == mod_type + 1
                 if mod_mask.any():
                     gamma, beta = self.to_film[mod_type](cond).chunk(2, dim = -1)
+                    gamma = gamma.to(x.dtype)
+                    beta = beta.to(x.dtype)
                     x_out[mod_mask] = x[mod_mask] * (gamma[mod_mask] + 1.) + beta[mod_mask]
 
             x = x_out
@@ -860,12 +862,13 @@ class AdaptiveWrapper(Module):
 
             text_mask = ~is_any_modality.squeeze(-1)
             if text_mask.any():
-                out_out[text_mask] = out[text_mask] * (self.layerscale + 1.)
+                out_out[text_mask] = out[text_mask] * (self.layerscale + 1.).to(out.dtype)
 
             for mod_type in range(self.num_modalities):
                 mod_mask = modality_type_mask == mod_type + 1
                 if mod_mask.any():
-                    out_out[mod_mask] = out[mod_mask] * self.to_ada_ln_zero[mod_type](cond)[mod_mask].sigmoid()
+                    ada_ln = self.to_ada_ln_zero[mod_type](cond).sigmoid().to(out.dtype)
+                    out_out[mod_mask] = out[mod_mask] * ada_ln[mod_mask]
 
             conditioned_out = out_out
         else:
